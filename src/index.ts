@@ -13,12 +13,38 @@ globalThis.require = (module: string) => {
 import Kuroshiro from "kuroshiro";
 import KuromojiAnalyzer from "@sglkc/kuroshiro-analyzer-kuromoji";
 
+const allowedOrigin = "https://sotsuken-odai.pages.dev";
+
+function getCorsHeaders(origin: string | null): Record<string, string> {
+  if (origin !== allowedOrigin) return {};
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin"
+  };
+}
+
+function withCors(response: Response, origin: string | null): Response {
+  const headers = new Headers(response.headers);
+  const corsHeaders = getCorsHeaders(origin);
+  for (const [key, value] of Object.entries(corsHeaders)) {
+    headers.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
 // --------- XHR Polyfill for Cloudflare Workers ---------
 declare global { var XMLHttpRequest: any; }
 globalThis.XMLHttpRequest = class {
   private _method!: string;
   private _url!: string;
-  private _headers: Record<string,string> = {};
+private _headers: Record<string,string> = {};
   public status!: number;
   public response!: ArrayBuffer;
   public responseType = "";
@@ -64,46 +90,57 @@ async function ensureInitialized() {
 export default {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const origin = request.headers.get("Origin");
+
+    if (request.method === "OPTIONS") {
+      if (origin !== allowedOrigin) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return new Response(null, {
+        status: 204,
+        headers: getCorsHeaders(origin)
+      });
+    }
 
     // 1) GET / → 随机 UUID
     if (request.method === "GET" && url.pathname === "/") {
-      return new Response(JSON.stringify({ uuid: crypto.randomUUID() }), {
+      return withCors(new Response(JSON.stringify({ uuid: crypto.randomUUID() }), {
         headers: { "Content-Type": "application/json" }
-      });
+      }), origin);
     }
 
     // 2) POST /v1/chat/completions → OpenAI Chat Completions (支持流式 + 合并 model/mode)
     if (url.pathname === "/v1/chat/completions") {
       if (request.method !== "POST") {
-        return new Response(JSON.stringify({
+        return withCors(new Response(JSON.stringify({
           error: "Method Not Allowed",
           message: "Use POST on /v1/chat/completions"
-        }), { status: 405, headers: { "Content-Type": "application/json" } });
+        }), { status: 405, headers: { "Content-Type": "application/json" } }), origin);
       }
 
       let body: any;
       try {
         body = await request.json();
       } catch {
-        return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+        return withCors(new Response(JSON.stringify({ error: "Invalid JSON body" }), {
           status: 400, headers: { "Content-Type": "application/json" }
-        });
+        }), origin);
       }
 
       // 验证 messages
       const messages = body.messages;
       if (!Array.isArray(messages) || messages.length === 0) {
-        return new Response(JSON.stringify({
+        return withCors(new Response(JSON.stringify({
           error: "Invalid format",
           message: "`messages` must be a non-empty array"
-        }), { status: 400, headers: { "Content-Type": "application/json" } });
+        }), { status: 400, headers: { "Content-Type": "application/json" } }), origin);
       }
       const last = messages[messages.length - 1];
       if (last.role !== "user" || typeof last.content !== "string") {
-        return new Response(JSON.stringify({
+        return withCors(new Response(JSON.stringify({
           error: "Invalid message",
           message: "Last message must be { role: 'user', content: string }"
-        }), { status: 400, headers: { "Content-Type": "application/json" } });
+        }), { status: 400, headers: { "Content-Type": "application/json" } }), origin);
       }
       const prompt = last.content;
 
@@ -134,10 +171,10 @@ export default {
       try {
         await ensureInitialized();
       } catch (e: any) {
-        return new Response(JSON.stringify({
+        return withCors(new Response(JSON.stringify({
           error: "Initialization failed",
           detail: e.toString()
-        }), { status: 500, headers: { "Content-Type": "application/json" } });
+        }), { status: 500, headers: { "Content-Type": "application/json" } }), origin);
       }
 
       // 转换
@@ -145,10 +182,10 @@ export default {
       try {
         converted = await kuro!.convert(prompt, { to, mode });
       } catch (e: any) {
-        return new Response(JSON.stringify({
+        return withCors(new Response(JSON.stringify({
           error: "Conversion failed",
           detail: e.toString()
-        }), { status: 500, headers: { "Content-Type": "application/json" } });
+        }), { status: 500, headers: { "Content-Type": "application/json" } }), origin);
       }
 
       // 非流式响应
@@ -171,9 +208,9 @@ export default {
             total_tokens: prompt.length + converted.length
           }
         };
-        return new Response(JSON.stringify(responseBody), {
+        return withCors(new Response(JSON.stringify(responseBody), {
           headers: { "Content-Type": "application/json" }
-        });
+        }), origin);
       }
 
       // 流式响应（SSE）
@@ -202,13 +239,13 @@ export default {
           controller.close();
         }
       });
-      return new Response(streamBody, {
+      return withCors(new Response(streamBody, {
         headers: {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           "Connection": "keep-alive"
         }
-      });
+      }), origin);
     }
 
     // 3) POST / → 原始简单接口
@@ -217,40 +254,40 @@ export default {
       try {
         payload = await request.json();
       } catch {
-        return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+        return withCors(new Response(JSON.stringify({ error: "Invalid JSON body" }), {
           status: 400, headers: { "Content-Type": "application/json" }
-        });
+        }), origin);
       }
       const { text, to = "hiragana", mode = "normal" } = payload;
       if (typeof text !== "string") {
-        return new Response(JSON.stringify({ error: "`text` must be a string" }), {
+        return withCors(new Response(JSON.stringify({ error: "`text` must be a string" }), {
           status: 400, headers: { "Content-Type": "application/json" }
-        });
+        }), origin);
       }
       try { await ensureInitialized(); } catch (e: any) {
-        return new Response(JSON.stringify({ error: "Initialization failed", detail: e.toString() }), {
+        return withCors(new Response(JSON.stringify({ error: "Initialization failed", detail: e.toString() }), {
           status: 500, headers: { "Content-Type": "application/json" }
-        });
+        }), origin);
       }
       try {
         const converted = await kuro!.convert(text, { to, mode });
-        return new Response(JSON.stringify({ converted }), {
+        return withCors(new Response(JSON.stringify({ converted }), {
           headers: { "Content-Type": "application/json" }
-        });
+        }), origin);
       } catch (e: any) {
-        return new Response(JSON.stringify({ error: "Conversion failed", detail: e.toString() }), {
+        return withCors(new Response(JSON.stringify({ error: "Conversion failed", detail: e.toString() }), {
           status: 500, headers: { "Content-Type": "application/json" }
-        });
+        }), origin);
       }
     }
 
     // fallback 404
-    return new Response(JSON.stringify({
+    return withCors(new Response(JSON.stringify({
       error: "Not Found",
       message: "Supported: GET /, POST /, POST /v1/chat/completions"
     }), {
       status: 404,
       headers: { "Content-Type": "application/json" }
-    });
+    }), origin);
   }
 };

@@ -1,6 +1,6 @@
 {
   "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
-  "name": "kuroshiro-worker",
+  "name": "kurishiro-api-worker",
   "main": "dist/index.js",
   "compatibility_date": "2025-05-03",
   "compatibility_flags": ["nodejs_compat_v2"],
